@@ -197,6 +197,11 @@ class AgentLoop:
                 model=self.model,
             )
 
+            # Debug logging for the response state
+            logger.debug("LLM Iteration {}: finish_reason={}, has_tool_calls={}, content_len={}",
+                         iteration, response.finish_reason, response.has_tool_calls,
+                         len(response.content) if response.content else 0)
+
             if response.has_tool_calls:
                 if on_progress:
                     thought = self._strip_think(response.content)
@@ -230,6 +235,20 @@ class AgentLoop:
                     logger.error("LLM returned error: {}", (clean or "")[:200])
                     final_content = clean or "Sorry, I encountered an error calling the AI model."
                     break
+                
+                # If content is empty but it's not a tool call and not an error, 
+                # check if it's a 'length' stop or something else that needs continuation.
+                if not clean and response.finish_reason != "stop":
+                    logger.warning("LLM returned empty content with finish_reason: {}", response.finish_reason)
+                    # We continue the loop to let the model try again or finish properly
+                    # unless we are at the very last iteration.
+                    if iteration < self.max_iterations:
+                        messages = self.context.add_assistant_message(
+                            messages, None, reasoning_content=response.reasoning_content,
+                            thinking_blocks=response.thinking_blocks,
+                        )
+                        continue
+
                 messages = self.context.add_assistant_message(
                     messages, clean, reasoning_content=response.reasoning_content,
                     thinking_blocks=response.thinking_blocks,
@@ -237,12 +256,16 @@ class AgentLoop:
                 final_content = clean
                 break
 
-        if final_content is None and iteration >= self.max_iterations:
-            logger.warning("Max iterations ({}) reached", self.max_iterations)
-            final_content = (
-                f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
-                "without completing the task. You can try breaking the task into smaller steps."
-            )
+        if final_content is None:
+            if iteration >= self.max_iterations:
+                logger.warning("Max iterations ({}) reached", self.max_iterations)
+                final_content = (
+                    f"I reached the maximum number of tool call iterations ({self.max_iterations}) "
+                    "without completing the task. You can try breaking the task into smaller steps."
+                )
+            else:
+                logger.error("Agent loop exited without final_content and without reaching max iterations")
+                final_content = "I've completed processing but have no response to give."
 
         return final_content, tools_used, messages
 
